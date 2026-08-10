@@ -69,10 +69,24 @@ python -m pytest tests/ -v
 
 16 個測試，涵蓋計分規則、事件解碼、API 回應解析、訊息格式化。全程 TDD 開發。
 
+## 標籤系統（W2）
+
+每個偵測到的交易對會在**上線當下快照初始價格**（無需 archive node），
+24 小時後回來查現價，跌超過 90% 標記為 `rug`，否則標記 `normal`。
+這些標籤累積成訓練資料庫，是未來 LightGBM 風險模型的訓練來源。
+
+```bash
+# 標籤資料庫預設存於 rugguard.db，自動累積
+# 匯出已標籤資料為 CSV 訓練集：
+RUGGUARD_EXPORT=1 python -m rugguard.main
+# -> 輸出 training_data.csv
+```
+
 ## Roadmap
 
 - [x] W1: 新交易對監聽 + 風險計分 + Telegram 警示
-- [ ] W2: 歷史價格標籤累積 + LightGBM 風險模型（取代規則計分）
+- [x] W2: 初始價格快照 + 24h 標籤累積（SQLite + CSV 匯出）
+- [ ] W2: LightGBM 風險模型（取代規則計分）
 - [ ] W3: 地址圖特徵（bundler 偵測）— 多錢包短時間共同買入的聚類分析
 - [ ] W3: Streamlit 儀表板
 
