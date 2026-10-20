@@ -21,7 +21,12 @@ def label_pending_tokens(
     pending = store.get_pending_tokens(min_age_hours=min_age_hours, now=now)
     labeled = 0
     for row in pending:
-        current = price_fetcher(row["pair"])
+        try:
+            current = price_fetcher(row["pair"])
+        except Exception as e:
+            # 單一交易對失敗不影響其他，下一輪再試
+            print(f"label price failed for {row['pair']}: {e}")
+            continue
         label = decide_label(row["initial_price"], current)
         store.update_label(pair=row["pair"], label=label, label_price=current)
         labeled += 1

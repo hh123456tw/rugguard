@@ -57,3 +57,19 @@ def test_label_pending_tokens_skips_young_tokens():
     label_pending_tokens(store, fetcher, min_age_hours=24, now=now + timedelta(hours=1))
 
     assert store.get_token("0xpair1")["label"] is None
+
+
+def test_price_failure_skips_only_that_pair():
+    store = LabelStore(":memory:")
+    now = datetime.now(timezone.utc)
+    store.add_token(pair="0xbad", token="0xt1", block=100, initial_price=0.001, detected_at=now)
+    store.add_token(pair="0xgood", token="0xt2", block=100, initial_price=0.001, detected_at=now)
+
+    def fetcher(pair):
+        if pair == "0xbad":
+            raise RuntimeError("rpc error")
+        return 0.002
+
+    assert label_pending_tokens(store, fetcher, min_age_hours=24, now=now + timedelta(hours=25)) == 1
+    assert store.get_token("0xbad")["label"] is None
+    assert store.get_token("0xgood")["label"] == "normal"

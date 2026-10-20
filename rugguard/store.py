@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -28,10 +29,17 @@ class LabelStore:
                 initial_price REAL NOT NULL,
                 label TEXT,
                 label_price REAL,
-                labeled_at TEXT
+                labeled_at TEXT,
+                features TEXT,
+                score INTEGER
             )
             """
         )
+        # 舊版資料庫沒有 features/score 欄位，補上
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tokens)")}
+        for col, typ in (("features", "TEXT"), ("score", "INTEGER")):
+            if col not in cols:
+                self.conn.execute(f"ALTER TABLE tokens ADD COLUMN {col} {typ}")
         self.conn.commit()
 
     def add_token(
@@ -43,11 +51,16 @@ class LabelStore:
         token0: str = "",
         token1: str = "",
         detected_at: datetime | None = None,
+        features: dict | None = None,
+        score: int | None = None,
     ) -> None:
         detected = detected_at.isoformat() if detected_at else _now()
+        # 重啟後同一交易對會再被掃到，保留第一次的快照
         self.conn.execute(
-            "INSERT INTO tokens (pair, token, token0, token1, block, detected_at, initial_price) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (pair, token, token0, token1, block, detected, initial_price),
+            "INSERT OR IGNORE INTO tokens (pair, token, token0, token1, block, detected_at, initial_price, features, score)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (pair, token, token0, token1, block, detected, initial_price,
+             json.dumps(features) if features is not None else None, score),
         )
         self.conn.commit()
 
@@ -76,3 +89,6 @@ class LabelStore:
             "SELECT * FROM tokens WHERE label IS NOT NULL ORDER BY detected_at"
         ).fetchall()
         return list(rows)
+
+    def get_all_tokens(self) -> list[sqlite3.Row]:
+        return list(self.conn.execute("SELECT * FROM tokens ORDER BY detected_at DESC"))

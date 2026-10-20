@@ -56,3 +56,42 @@ def test_get_training_rows():
     rows = store.get_training_rows()
     assert len(rows) == 1
     assert rows[0]["label"] == "rug"
+
+
+def test_duplicate_pair_keeps_first_snapshot():
+    store = LabelStore(":memory:")
+    store.add_token(pair="0xpair1", token="0xtoken1", block=100, initial_price=0.001)
+    store.add_token(pair="0xpair1", token="0xtoken1", block=100, initial_price=0.5)
+    assert store.get_token("0xpair1")["initial_price"] == 0.001
+
+
+def test_features_and_score_stored():
+    store = LabelStore(":memory:")
+    store.add_token(pair="0xp", token="0xt", block=1, initial_price=1.0, features={"is_honeypot": "1"}, score=30)
+    row = store.get_token("0xp")
+    assert row["score"] == 30
+    assert '"is_honeypot": "1"' in row["features"]
+
+
+OLD_SCHEMA = (
+    "CREATE TABLE tokens (pair TEXT PRIMARY KEY, token TEXT NOT NULL, token0 TEXT NOT NULL,"
+    " token1 TEXT NOT NULL, block INTEGER NOT NULL, detected_at TEXT NOT NULL,"
+    " initial_price REAL NOT NULL, label TEXT, label_price REAL, labeled_at TEXT)"
+)
+
+
+def test_old_database_gets_new_columns(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.execute(OLD_SCHEMA)
+    conn.execute("INSERT INTO tokens (pair, token, token0, token1, block, detected_at, initial_price)"
+                 " VALUES ('0xold', '0xt', '', '', 1, '2026-01-01', 1.0)")
+    conn.commit()
+    conn.close()
+
+    store = LabelStore(str(db))
+    store.add_token(pair="0xnew", token="0xt", block=2, initial_price=1.0, features={}, score=5)
+    assert store.get_token("0xold")["features"] is None
+    assert store.get_token("0xnew")["score"] == 5
