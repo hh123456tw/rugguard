@@ -1,15 +1,22 @@
+import os
 from datetime import datetime
 
-RUG_THRESHOLD = 0.1  # 價格跌到初始 10% 以下
+RUG_THRESHOLD = 0.1  # 價格跌到買入價 10% 以下
+WIN_RETURN = float(os.getenv("WIN_RETURN", "2.0"))  # 24h 後 >= 2 倍 = 能買
+TRADED_LABELS = ("rug", "normal", "win")  # dead 不進訓練
 
 
 def decide_label(initial_price: float, current_price: float) -> str:
     if initial_price <= 0:
-        return "normal"
-    if current_price <= 0:
-        return "rug"
+        return "dead"  # 評估當下沒有流動性，沒有可買的價格
+    if current_price == initial_price:
+        return "dead"  # 儲備完全沒變 = 沒人交易
     ratio = current_price / initial_price
-    return "rug" if ratio <= RUG_THRESHOLD else "normal"
+    if ratio <= RUG_THRESHOLD:
+        return "rug"
+    if ratio >= WIN_RETURN:
+        return "win"
+    return "normal"
 
 
 def label_pending_tokens(
@@ -31,3 +38,11 @@ def label_pending_tokens(
         store.update_label(pair=row["pair"], label=label, label_price=current)
         labeled += 1
     return labeled
+
+
+def relabel_all(store) -> int:
+    """用已存的價格重算標籤（標籤規則改變時用），不需要查鏈。"""
+    rows = store.get_training_rows()
+    for row in rows:
+        store.set_label(row["pair"], decide_label(row["initial_price"], row["label_price"]))
+    return len(rows)

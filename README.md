@@ -48,8 +48,9 @@ cp .env.example .env
 python -m rugguard.main
 ```
 
-每 60 秒掃描最新 100 個區塊的新交易對，風險分數 >= 30 即推送。
-GoPlus 還查不到的新代幣會在下一輪自動重試（只要還在 100 區塊內）。
+每輪從上次掃到的區塊接著掃（不漏交易對）。新交易對會先等 600 塊（BSC 約 0.45 秒/塊 ≈ 4.5 分鐘），
+有流動性後才查 GoPlus、統計這 600 塊內的早期買家，並以當下價格作為買入價；約 30 分鐘仍無流動性就放棄。
+風險分數 >= 30 推送風險警示，能買分數 >= 50（有模型時）推送能買候選。
 
 ## 風險計分規則
 
@@ -71,12 +72,20 @@ GoPlus 還查不到的新代幣會在下一輪自動重試（只要還在 100 �
 python -m pytest tests/ -v
 ```
 
-61 個測試，涵蓋計分規則、事件解碼、bundler 特徵、標籤、匯出、模型訓練、儀表板資料。
+83 個測試，涵蓋計分規則、事件解碼、bundler 特徵、延遲評估、標籤、匯出、模型訓練、價格路徑、回測、儀表板資料。
 
 ## 標籤系統（W2）
 
-每個偵測到的交易對會在**上線當下快照初始價格**（無需 archive node），
-24 小時後回來查現價，跌超過 90% 標記為 `rug`，否則標記 `normal`。
+每個交易對以**評估當下的價格**為買入價，24 小時後回查現價並標記：
+
+| 標籤 | 條件 |
+|---|---|
+| `dead` | 評估時沒流動性，或價格完全沒動（沒人交易），不進訓練 |
+| `rug` | 跌到買入價 10% 以下 |
+| `win` | 漲到 2 倍以上（`WIN_RETURN`） |
+| `normal` | 其他 |
+
+標籤規則改變時，可用 `rugguard.labeler.relabel_all` 以已存價格重算。
 這些標籤累積成訓練資料庫，是未來 LightGBM 風險模型的訓練來源。
 
 ```bash
@@ -96,8 +105,22 @@ python -m rugguard.model training_data.csv rugguard_model.txt
 # 印出 cross-val AUC，並存檔
 ```
 
-`rugguard_model.txt` 存在時，`rugguard.main` 自動改用模型機率 ×100 當風險分數；
-不存在則用規則計分。至少需要 2 筆 rug 與 2 筆 normal 才能訓練。
+多分類模型（rug / normal / win），只用有交易的代幣訓練。輸出風險分數 = P(rug)×100、
+能買分數 = P(win)×100。`rugguard_model.txt` 存在時 `rugguard.main` 自動使用，否則用規則計分。
+新流程（v2）資料滿 200 筆後只用 v2 訓練，避免和舊的「偵測當下」特徵混用。
+
+## 停利回測與 rug 型態
+
+蒐集程式每輪用 Multicall3 對進場 24h 內的交易對取樣價格與兩邊儲備（約 1-2 分鐘一次）。
+
+```bash
+python -m rugguard.backtest
+```
+
+輸出各種停利（1.2x-10x）× 停損組合扣手續費與稅後的平均/中位報酬，
+以及 rug 型態：一次崩完（來不及逃）的比例、撤池 vs 倒貨、進場到崩盤的時間、崩盤前曾漲到幾倍。
+
+文獻與業界做法整理見 [docs/research-sota.md](docs/research-sota.md)。
 
 ## 儀表板
 
@@ -114,6 +137,9 @@ python -m streamlit run rugguard/dashboard.py
 - [x] W2: LightGBM 風險模型（取代規則計分）
 - [x] W3: 地址圖特徵（bundler 偵測）— 同區塊多錢包共同買入
 - [x] W3: Streamlit 儀表板
+- [x] 延遲評估 + 四類標籤 + 多分類模型（能買分數）
+- [x] 價格路徑取樣 + 停利/停損回測
+- [ ] 回測扣費後期望值為正之前，不做自動下單
 
 ## 專案結構
 
@@ -128,6 +154,8 @@ rugguard/
 ├── store.py          # SQLite 標籤資料庫
 ├── labeler.py        # 24h 標籤判定與回填
 ├── export.py         # 訓練集 CSV 匯出
+├── paths.py          # Multicall3 價格路徑取樣
+├── backtest.py       # 停利/停損回測與 rug 型態分析
 ├── dashboard.py      # Streamlit 儀表板
 ├── notifier.py       # Telegram 推播 + 訊息格式化
 └── main.py           # 主流程整合

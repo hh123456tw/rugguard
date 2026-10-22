@@ -24,6 +24,8 @@ def export_training_csv(store_rows: list, path: str) -> int:
             "initial_price": r["initial_price"],
             "label_price": r["label_price"],
             "label": r["label"],
+            "ret": r["label_price"] / r["initial_price"] if r["initial_price"] > 0 else "",
+            "version": json.loads(r["features"]).get("version", 1),
             **extract_features(json.loads(r["features"])),
         }
         for r in store_rows

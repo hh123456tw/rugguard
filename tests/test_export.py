@@ -30,6 +30,8 @@ def test_export_writes_features(tmp_path):
     assert data[0]["label"] == "rug"
     assert data[0]["is_honeypot"] == "1.0"
     assert data[0]["buy_tax"] == "0.2"
+    assert float(data[0]["ret"]) == 0.05
+    assert data[0]["version"] == "1"
 
 
 def test_export_skips_rows_without_features(tmp_path):

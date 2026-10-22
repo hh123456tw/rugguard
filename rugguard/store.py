@@ -31,15 +31,29 @@ class LabelStore:
                 label_price REAL,
                 labeled_at TEXT,
                 features TEXT,
-                score INTEGER
+                score INTEGER,
+                buy_score INTEGER
             )
             """
         )
-        # 舊版資料庫沒有 features/score 欄位，補上
+        # 舊版資料庫沒有 features/score/buy_score 欄位，補上
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tokens)")}
-        for col, typ in (("features", "TEXT"), ("score", "INTEGER")):
+        for col, typ in (("features", "TEXT"), ("score", "INTEGER"), ("buy_score", "INTEGER")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE tokens ADD COLUMN {col} {typ}")
+        # 進場後 24h 內每輪取樣的價格與兩邊儲備（分辨撤池 vs 倒貨）
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS price_path (
+                pair TEXT NOT NULL,
+                block INTEGER NOT NULL,
+                price REAL NOT NULL,
+                reserve_alt REAL NOT NULL,
+                reserve_bnb REAL NOT NULL,
+                PRIMARY KEY (pair, block)
+            )
+            """
+        )
         self.conn.commit()
 
     def add_token(
@@ -53,14 +67,16 @@ class LabelStore:
         detected_at: datetime | None = None,
         features: dict | None = None,
         score: int | None = None,
+        buy_score: int | None = None,
     ) -> None:
         detected = detected_at.isoformat() if detected_at else _now()
         # 重啟後同一交易對會再被掃到，保留第一次的快照
         self.conn.execute(
-            "INSERT OR IGNORE INTO tokens (pair, token, token0, token1, block, detected_at, initial_price, features, score)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO tokens"
+            " (pair, token, token0, token1, block, detected_at, initial_price, features, score, buy_score)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (pair, token, token0, token1, block, detected, initial_price,
-             json.dumps(features) if features is not None else None, score),
+             json.dumps(features) if features is not None else None, score, buy_score),
         )
         self.conn.commit()
 
@@ -80,6 +96,31 @@ class LabelStore:
             (label, label_price, _now(), pair),
         )
         self.conn.commit()
+
+    def set_label(self, pair: str, label: str) -> None:
+        self.conn.execute("UPDATE tokens SET label = ? WHERE pair = ?", (label, pair))
+        self.conn.commit()
+
+    def get_tracking_pairs(self, hours: int = 24, now: datetime | None = None) -> list[sqlite3.Row]:
+        cutoff = (now or datetime.now(timezone.utc)) - timedelta(hours=hours)
+        return list(self.conn.execute(
+            "SELECT pair, token0, token1 FROM tokens WHERE initial_price > 0 AND detected_at >= ?",
+            (cutoff.isoformat(),),
+        ))
+
+    def add_path_points(self, points: list[tuple]) -> None:
+        # 交易對地址統一存小寫，方便和 tokens.pair 對照時用 lower()
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO price_path (pair, block, price, reserve_alt, reserve_bnb) VALUES (?, ?, ?, ?, ?)",
+            points,
+        )
+        self.conn.commit()
+
+    def get_path(self, pair: str) -> list[sqlite3.Row]:
+        return list(self.conn.execute(
+            "SELECT block, price, reserve_alt, reserve_bnb FROM price_path WHERE pair = ? ORDER BY block",
+            (pair.lower(),),
+        ))
 
     def get_token(self, pair: str) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM tokens WHERE pair = ?", (pair,)).fetchone()

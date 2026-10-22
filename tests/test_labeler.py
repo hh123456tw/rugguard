@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from rugguard.labeler import decide_label, label_pending_tokens
+from rugguard.labeler import decide_label, label_pending_tokens, relabel_all
 from rugguard.store import LabelStore
 
 
@@ -17,15 +17,31 @@ def test_moderate_drop_is_normal():
 
 
 def test_price_gain_is_normal():
-    assert decide_label(initial_price=0.001, current_price=0.002) == "normal"
+    assert decide_label(initial_price=0.001, current_price=0.0015) == "normal"
 
 
 def test_zero_current_price_is_rug():
     assert decide_label(initial_price=0.001, current_price=0) == "rug"
 
 
-def test_zero_initial_price_not_rug():
-    assert decide_label(initial_price=0, current_price=0.0005) == "normal"
+def test_zero_initial_price_is_dead():
+    assert decide_label(initial_price=0, current_price=0.0005) == "dead"
+
+
+def test_unchanged_price_is_dead():
+    assert decide_label(initial_price=0.001, current_price=0.001) == "dead"
+
+
+def test_tiny_change_is_not_dead():
+    assert decide_label(initial_price=0.001, current_price=0.0010001) == "normal"
+
+
+def test_double_is_win():
+    assert decide_label(initial_price=0.001, current_price=0.002) == "win"
+
+
+def test_just_below_double_is_normal():
+    assert decide_label(initial_price=0.001, current_price=0.00199) == "normal"
 
 
 class FakePriceFetcher:
@@ -68,8 +84,19 @@ def test_price_failure_skips_only_that_pair():
     def fetcher(pair):
         if pair == "0xbad":
             raise RuntimeError("rpc error")
-        return 0.002
+        return 0.0015
 
     assert label_pending_tokens(store, fetcher, min_age_hours=24, now=now + timedelta(hours=25)) == 1
     assert store.get_token("0xbad")["label"] is None
     assert store.get_token("0xgood")["label"] == "normal"
+
+
+def test_relabel_all_uses_stored_prices():
+    store = LabelStore(":memory:")
+    store.add_token(pair="0xdead", token="0xt", block=1, initial_price=0.0)
+    store.update_label(pair="0xdead", label="normal", label_price=0.5)
+    store.add_token(pair="0xwin", token="0xt", block=1, initial_price=1.0)
+    store.update_label(pair="0xwin", label="normal", label_price=3.0)
+    assert relabel_all(store) == 2
+    assert store.get_token("0xdead")["label"] == "dead"
+    assert store.get_token("0xwin")["label"] == "win"

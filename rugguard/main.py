@@ -9,7 +9,8 @@ from rugguard.export import export_training_csv
 from rugguard.goplus_client import GoPlusClient
 from rugguard.labeler import label_pending_tokens
 from rugguard.model import RiskModel
-from rugguard.notifier import TelegramNotifier, format_alert_message
+from rugguard.paths import record_paths
+from rugguard.notifier import TelegramNotifier, format_alert_message, format_buy_message
 from rugguard.price import get_pair_price
 from rugguard.scanner import PancakePairScanner
 from rugguard.scoring import (
@@ -29,6 +30,11 @@ load_dotenv()
 MIN_ALERT_SCORE = int(os.getenv("MIN_ALERT_SCORE", "30"))
 LABEL_MIN_AGE_HOURS = int(os.getenv("LABEL_MIN_AGE_HOURS", "24"))
 LABEL_FREQUENCY = int(os.getenv("LABEL_FREQUENCY", "6"))  # 每幾小時回填一次標籤
+MIN_BUY_SCORE = int(os.getenv("MIN_BUY_SCORE", "50"))
+# BSC 約 0.45 秒一塊：600 塊 ≈ 4.5 分鐘後才評估，4000 塊 ≈ 30 分鐘沒流動性就放棄
+ENTRY_DELAY_BLOCKS = int(os.getenv("ENTRY_DELAY_BLOCKS", "600"))
+MAX_WAIT_BLOCKS = int(os.getenv("MAX_WAIT_BLOCKS", "4000"))
+MAX_SCAN_RANGE = 2000
 BNB = "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"
 
 
@@ -60,14 +66,32 @@ def load_model() -> RiskModel | None:
     return RiskModel(path) if os.path.exists(path) else None
 
 
-def process_pair(w3, goplus, notifier, store, model, ev, latest: int) -> None:
+def evaluate_pair(w3, goplus, notifier, store, model, ev, latest: int) -> bool:
+    """回傳 True = 已評估存檔或放棄，False = 還要再等。"""
+    if latest < ev.block_number + ENTRY_DELAY_BLOCKS:
+        return False
     alt_is_token0 = ev.token0.lower() != BNB
     token = ev.token0 if alt_is_token0 else ev.token1
-    security = goplus.fetch_token_security(token)
-    buys = fetch_early_buys(w3, ev.pair, ev.block_number, latest, alt_is_token0)
-    features = {**security, **bundle_features(buys)}
-    score = model.score(features) if model else compute_risk_score(features)
     price = get_pair_price(w3, ev.pair, ev.token0, ev.token1)
+    if price <= 0:
+        # 還沒加流動性就沒有可買的價格，繼續等
+        if latest >= ev.block_number + MAX_WAIT_BLOCKS:
+            print(f"give up {ev.pair}: no liquidity after {MAX_WAIT_BLOCKS} blocks")
+            return True
+        return False
+    security = goplus.fetch_token_security(token)
+    # 特徵只看買入決策前固定 ENTRY_DELAY_BLOCKS 個區塊，避免偵測時間不同造成偏差
+    buys = fetch_early_buys(w3, ev.pair, latest - ENTRY_DELAY_BLOCKS, latest, alt_is_token0)
+    features = {
+        **security,
+        **bundle_features(buys),
+        "entry_delay_blocks": latest - ev.block_number,
+        "version": 2,
+    }
+    if model:
+        score, buy_score = model.predict(features)
+    else:
+        score, buy_score = compute_risk_score(features), None
     store.add_token(
         pair=ev.pair,
         token=token,
@@ -77,23 +101,25 @@ def process_pair(w3, goplus, notifier, store, model, ev, latest: int) -> None:
         token1=ev.token1,
         features=features,
         score=score,
+        buy_score=buy_score,
     )
+    messages = []
     if score >= MIN_ALERT_SCORE:
+        messages.append(format_alert_message(
+            token_address=token, pair=ev.pair, score=score,
+            level=risk_level(score), reasons=alert_reasons(features),
+        ))
+    if buy_score is not None and buy_score >= MIN_BUY_SCORE:
+        messages.append(format_buy_message(token, ev.pair, buy_score, score))
+    for msg in messages:
         try:
-            notifier.send(
-                format_alert_message(
-                    token_address=token,
-                    pair=ev.pair,
-                    score=score,
-                    level=risk_level(score),
-                    reasons=alert_reasons(features),
-                )
-            )
+            notifier.send(msg)
         except Exception as e:
             print(f"telegram send failed for {ev.pair}: {e}")
+    return True
 
 
-def run_once(seen: set[str], model: RiskModel | None = None) -> None:
+def run_once(state: dict, model: RiskModel | None = None) -> None:
     w3 = Web3(Web3.HTTPProvider(os.getenv("BSC_RPC_URL")))
     scanner = PancakePairScanner(w3)
     goplus = GoPlusClient()
@@ -102,19 +128,33 @@ def run_once(seen: set[str], model: RiskModel | None = None) -> None:
         os.getenv("TELEGRAM_CHAT_ID"),
     )
     store = LabelStore(os.getenv("DB_PATH", "rugguard.db"))
+    pending = state.setdefault("pending", {})
 
     latest = w3.eth.block_number
-    events = scanner.fetch_pairs(latest - 100, latest)
-    new_events = [ev for ev in events if ev.pair not in seen]
-    print(f"found {len(events)} pairs, {len(new_events)} new")
-    for ev in new_events:
+    # shortcut: 停機或啟動時只補最近 MAX_SCAN_RANGE 塊；要補更久需分段查 get_logs
+    start = max(state.get("last_block", latest - MAX_SCAN_RANGE) + 1, latest - MAX_SCAN_RANGE)
+    events = scanner.fetch_pairs(start, latest)
+    state["last_block"] = latest
+    new = [ev for ev in events if ev.pair not in pending and store.get_token(ev.pair) is None]
+    for ev in new:
+        pending[ev.pair] = ev
+    print(f"blocks {start}-{latest}: {len(events)} pairs, {len(new)} new, {len(pending)} pending")
+
+    for pair, ev in list(pending.items()):
         try:
-            process_pair(w3, goplus, notifier, store, model, ev, latest)
+            done = evaluate_pair(w3, goplus, notifier, store, model, ev, latest)
         except Exception as e:
-            # 新代幣常常 GoPlus 還查不到；不加進 seen，下一輪（仍在 100 區塊內）會重試
-            print(f"skip {ev.pair} this round: {e}")
-            continue
-        seen.add(ev.pair)
+            # 新代幣常常 GoPlus 還查不到，等下一輪；等太久就放棄
+            done = latest >= ev.block_number + MAX_WAIT_BLOCKS
+            print(f"{'give up' if done else 'retry later'} {pair}: {e}")
+        if done:
+            del pending[pair]
+
+    try:
+        points = record_paths(w3, store, latest)
+        print(f"recorded {points} price points")
+    except Exception as e:
+        print(f"price path recording failed: {e}")
 
 
 def run_labeling() -> None:
@@ -143,13 +183,13 @@ def main() -> None:
     if os.getenv("RUGGUARD_EXPORT") == "1":
         export_labels()
         return
-    seen: set[str] = set()
+    state: dict = {}
     model = load_model()
     print("scoring with LightGBM model" if model else "scoring with rules")
     last_label = time.time()
     while True:
         try:
-            run_once(seen, model)
+            run_once(state, model)
             if time.time() - last_label >= LABEL_FREQUENCY * 3600:
                 run_labeling()
                 last_label = time.time()
