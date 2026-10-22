@@ -7,3 +7,5 @@ venv/
 rugguard.db
 training_data.csv
 rugguard_model.txt
+collector.log
+collector.err.log
