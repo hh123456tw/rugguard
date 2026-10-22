@@ -26,7 +26,8 @@ MULTICALL_ABI = [{
 
 def to_point(pair: str, block: int, token0: str, token1: str, raw: bytes) -> tuple:
     """回傳 (pair, block, price, alt 儲備, BNB 儲備)。"""
-    r0, r1, _ = decode(["uint112", "uint112", "uint32"], raw)
+    # getReserves 回傳 3 個欄位、Sync 事件 2 個；前兩個都是 reserve0, reserve1
+    r0, r1 = decode(["uint112", "uint112"], raw[:64])
     alt_is_token0 = token0.lower() != BNB
     price = compute_price_from_reserves(r0, r1, token0, token1)
     return (pair.lower(), block, price, float(r0 if alt_is_token0 else r1), float(r1 if alt_is_token0 else r0))

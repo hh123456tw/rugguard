@@ -9,3 +9,5 @@ training_data.csv
 rugguard_model.txt
 collector.log
 collector.err.log
+backfill.log
+backfill.err.log

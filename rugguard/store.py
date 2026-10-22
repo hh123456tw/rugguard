@@ -12,7 +12,8 @@ class LabelStore:
     def __init__(self, db_path: str = "rugguard.db"):
         if db_path != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
+        # 蒐集程式與回補程式會同時寫入，等鎖久一點
+        self.conn = sqlite3.connect(db_path, timeout=60)
         self.conn.row_factory = sqlite3.Row
         self._init_db()
 
@@ -42,6 +43,15 @@ class LabelStore:
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE tokens ADD COLUMN {col} {typ}")
         # 進場後 24h 內每輪取樣的價格與兩邊儲備（分辨撤池 vs 倒貨）
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS backfill_chunks (
+                pair TEXT NOT NULL,
+                start_block INTEGER NOT NULL,
+                PRIMARY KEY (pair, start_block)
+            )
+            """
+        )
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS price_path (
@@ -121,6 +131,18 @@ class LabelStore:
             "SELECT block, price, reserve_alt, reserve_bnb FROM price_path WHERE pair = ? ORDER BY block",
             (pair.lower(),),
         ))
+
+    def update_features(self, pair: str, features: dict) -> None:
+        self.conn.execute("UPDATE tokens SET features = ? WHERE pair = ?", (json.dumps(features), pair))
+        self.conn.commit()
+
+    def get_done_chunks(self, pair: str) -> set[int]:
+        return {r["start_block"] for r in self.conn.execute(
+            "SELECT start_block FROM backfill_chunks WHERE pair = ?", (pair,))}
+
+    def mark_chunk_done(self, pair: str, start_block: int) -> None:
+        self.conn.execute("INSERT OR IGNORE INTO backfill_chunks VALUES (?, ?)", (pair, start_block))
+        self.conn.commit()
 
     def get_token(self, pair: str) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM tokens WHERE pair = ?", (pair,)).fetchone()

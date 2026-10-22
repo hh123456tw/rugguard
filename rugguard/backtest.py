@@ -9,6 +9,7 @@ SWAP_FEE = 0.0025  # PancakeSwap v2 每次交易手續費
 TAKE_PROFITS = [None, 1.2, 1.5, 2, 3, 5, 10]
 STOP_LOSSES = [None, 0.7, 0.5]
 BLOCK_SECONDS = 0.45
+HORIZON_BLOCKS = int(24 * 3600 / BLOCK_SECONDS)
 
 
 def simulate(path: list[tuple[int, float]], entry: float, final: float,
@@ -58,20 +59,20 @@ def load_trades(store) -> list[dict]:
         if row["label"] == "dead" or not row["features"] or row["initial_price"] <= 0:
             continue
         feats = json.loads(row["features"])
-        if feats.get("version", 1) < 2:
-            continue  # 舊資料沒有進場區塊與價格路徑
-        path = store.get_path(row["pair"])
-        if not path:
+        # 舊資料要回補完整路徑才能回測；v2 由蒐集程式即時取樣
+        if feats.get("version", 1) < 2 and not feats.get("path_complete"):
             continue
-        entry_block = row["block"] + int(feats["entry_delay_blocks"])
+        entry_block = feats.get("entry_block") or row["block"] + int(feats["entry_delay_blocks"])
+        path = [p for p in store.get_path(row["pair"]) if entry_block < p["block"] <= entry_block + HORIZON_BLOCKS]
         trades.append({
             "entry": row["initial_price"],
             "entry_block": entry_block,
-            "final": row["label_price"],
+            # 持有到期用 24h 內最後一個價格；24h 都沒交易代表價格沒變
+            "final": path[-1]["price"] if path else row["initial_price"],
             "label": row["label"],
             "buy_score": row["buy_score"],
             "cost": (1 - SWAP_FEE) ** 2 * (1 - _to_float(feats.get("buy_tax"))) * (1 - _to_float(feats.get("sell_tax"))),
-            "path": [(p["block"], p["price"], p["reserve_alt"]) for p in path if p["block"] > entry_block],
+            "path": [(p["block"], p["price"], p["reserve_alt"]) for p in path],
         })
     return trades
 
