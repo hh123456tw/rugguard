@@ -67,3 +67,34 @@ def test_train_refuses_missing_class(tmp_path):
     write_csv(csv_path, [r for r in synthetic_rows(30) if r["label"] != "win"])
     with pytest.raises(ValueError, match="win"):
         train(str(csv_path), str(tmp_path / "m.txt"))
+
+
+def test_unknown_liquidity_and_holders_are_minus_one_not_zero():
+    f = extract_features({"liquidity_usd": 0.0})
+    assert f["liquidity_usd"] == 0.0
+    assert f["top10_holder_percent"] == -1.0
+
+
+def test_walk_forward_only_predicts_later_rows():
+    import pandas as pd
+
+    from rugguard.model import walk_forward
+
+    df = pd.DataFrame(synthetic_rows(300))
+    df["detected_at"] = [f"2026-10-{1 + i // 20:02d}T{i % 20:02d}:00" for i in range(300)]
+    eval_df, probs = walk_forward(df)
+    first_eval = eval_df["detected_at"].min()
+    assert first_eval > df["detected_at"].min()  # 最早那段只拿來訓練
+    assert len(eval_df) == len(probs) < len(df)
+
+
+def test_only_if_better_keeps_current_model(tmp_path):
+    import json
+
+    csv_path, model_path = tmp_path / "t.csv", tmp_path / "m.txt"
+    write_csv(csv_path, synthetic_rows())
+    train(str(csv_path), str(model_path))
+    meta = json.loads((tmp_path / "m.txt.json").read_text(encoding="utf-8"))
+    meta["win_auc"] = 1.5  # 假裝現有模型好很多
+    (tmp_path / "m.txt.json").write_text(json.dumps(meta), encoding="utf-8")
+    assert train(str(csv_path), str(model_path), only_if_better=True)["saved"] is False

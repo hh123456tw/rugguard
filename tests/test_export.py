@@ -38,3 +38,9 @@ def test_export_skips_rows_without_features(tmp_path):
     target = tmp_path / "train.csv"
     assert export_training_csv([row("0xold", None)], str(target)) == 0
     assert not target.exists()
+
+
+def test_export_skips_invalid_rows_without_label_price(tmp_path):
+    target = tmp_path / "train.csv"
+    bad = {**row("0xbad", json.dumps({})), "label": "invalid", "label_price": None}
+    assert export_training_csv([bad, row("0xok", json.dumps({}))], str(target)) == 1

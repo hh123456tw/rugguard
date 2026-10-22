@@ -29,7 +29,8 @@ def export_training_csv(store_rows: list, path: str) -> int:
             **extract_features(json.loads(r["features"])),
         }
         for r in store_rows
-        if r["features"]
+        # invalid（交易對判斷錯誤）不匯出；它們不一定有 24h 價格
+        if r["features"] and r["label"] != "invalid" and r["label_price"] is not None
     ]
     if not rows:
         return 0

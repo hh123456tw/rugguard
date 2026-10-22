@@ -18,6 +18,12 @@ def load_frame(db_path: str) -> pd.DataFrame:
     return df.drop(columns=["features"])
 
 
+def paper_frame(db_path: str) -> pd.DataFrame:
+    rows = LabelStore(db_path).get_positions()
+    return pd.DataFrame([dict(r) for r in rows], columns=[
+        "pair", "token", "opened_at", "entry_price", "closed_at", "reason", "net_return"])
+
+
 def main() -> None:
     import streamlit as st
 
@@ -35,6 +41,20 @@ def main() -> None:
     c2.metric("已標籤（有交易）", f"{len(labeled)}（{len(traded)}）")
     c3.metric("有交易中 rug 比例", f"{(traded['label'] == 'rug').mean():.0%}" if len(traded) else "-")
     c4.metric("有交易中 win 比例", f"{(traded['label'] == 'win').mean():.0%}" if len(traded) else "-")
+
+    st.subheader("紙上交易")
+    pos = paper_frame(os.getenv("DB_PATH", "rugguard.db"))
+    closed = pos[pos["net_return"].notna()]
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("持倉中", int(pos["net_return"].isna().sum()))
+    p2.metric("已平倉", len(closed))
+    p3.metric("平均報酬（扣成本）", f"{closed['net_return'].mean():.2f}x" if len(closed) else "-")
+    p4.metric("賺錢比例", f"{(closed['net_return'] > 1).mean():.0%}" if len(closed) else "-")
+    if len(closed):
+        # 每筆固定 1 單位資金：累積損益 = Σ(報酬 - 1)
+        curve = closed.sort_values("closed_at").assign(pnl=lambda d: (d["net_return"] - 1).cumsum())
+        st.line_chart(curve.set_index("closed_at")["pnl"])
+    st.dataframe(pos.head(100), width="stretch")
 
     st.subheader("能買候選（尚未滿 24h，依能買分數排序）")
     st.caption("能買分數 = 模型估計 24h 漲 2 倍以上的機率；僅供研究，不是投資建議。")

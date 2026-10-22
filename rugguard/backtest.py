@@ -1,15 +1,22 @@
 """停利/停損回測與 rug 型態分析。用法：python -m rugguard.backtest"""
 import json
 import os
+import random
 import statistics
 
+from rugguard.chains import CHAIN
 from rugguard.scoring import _to_float
 
 SWAP_FEE = 0.0025  # PancakeSwap v2 每次交易手續費
 TAKE_PROFITS = [None, 1.2, 1.5, 2, 3, 5, 10]
 STOP_LOSSES = [None, 0.7, 0.5]
-BLOCK_SECONDS = 0.45
+BLOCK_SECONDS = CHAIN["block_seconds"]
 HORIZON_BLOCKS = int(24 * 3600 / BLOCK_SECONDS)
+
+
+def trade_cost(feats: dict) -> float:
+    """一買一賣的保留比例：兩次手續費 + 買稅 + 賣稅。"""
+    return (1 - SWAP_FEE) ** 2 * (1 - _to_float(feats.get("buy_tax"))) * (1 - _to_float(feats.get("sell_tax")))
 
 
 def simulate(path: list[tuple[int, float]], entry: float, final: float,
@@ -44,19 +51,24 @@ def rug_anatomy(path: list[tuple[int, float, float]], entry: float, entry_block:
     return None
 
 
-def summarize(returns: list[float]) -> dict:
+def summarize(returns: list[float], resamples: int = 1000) -> dict:
+    # bootstrap 95% 信賴區間：下界 > 1 才算「扣費後期望值為正」站得住
+    rng = random.Random(0)
+    means = sorted(statistics.fmean(rng.choices(returns, k=len(returns))) for _ in range(resamples))
     return {
         "n": len(returns),
         "mean": statistics.fmean(returns),
         "median": statistics.median(returns),
         "profitable": sum(r > 1 for r in returns) / len(returns),
+        "ci_low": means[int(resamples * 0.025)],
+        "ci_high": means[int(resamples * 0.975)],
     }
 
 
 def load_trades(store) -> list[dict]:
     trades = []
     for row in store.get_training_rows():
-        if row["label"] == "dead" or not row["features"] or row["initial_price"] <= 0:
+        if row["label"] not in ("rug", "normal", "win") or not row["features"] or row["initial_price"] <= 0:
             continue
         feats = json.loads(row["features"])
         # 舊資料要回補完整路徑才能回測；v2 由蒐集程式即時取樣
@@ -71,7 +83,7 @@ def load_trades(store) -> list[dict]:
             "final": path[-1]["price"] if path else row["initial_price"],
             "label": row["label"],
             "buy_score": row["buy_score"],
-            "cost": (1 - SWAP_FEE) ** 2 * (1 - _to_float(feats.get("buy_tax"))) * (1 - _to_float(feats.get("sell_tax"))),
+            "cost": trade_cost(feats),
             "path": [(p["block"], p["price"], p["reserve_alt"]) for p in path],
         })
     return trades
@@ -88,13 +100,16 @@ def report(trades: list[dict]) -> None:
 
     for name, group in groups.items():
         print(f"\n== {name} (n={len(group)}) ==")
-        print(f"{'take profit':>11} {'stop loss':>9} {'mean':>7} {'median':>7} {'profitable':>10}")
+        print(f"{'take profit':>11} {'stop loss':>9} {'mean':>7} {'95% CI':>15} {'median':>7} {'profitable':>10}")
         for tp in TAKE_PROFITS:
             for sl in STOP_LOSSES:
                 rets = [simulate([(b, p) for b, p, _ in t["path"]], t["entry"], t["final"],
                                  tp, sl, t["cost"]) for t in group]
                 s = summarize(rets)
-                print(f"{tp or 'hold 24h':>11} {sl or '-':>9} {s['mean']:7.2f} {s['median']:7.2f} {s['profitable']:10.0%}")
+                ci = f"[{s['ci_low']:.2f}, {s['ci_high']:.2f}]"
+                flag = "  <- EV>1" if s["ci_low"] > 1 else ""
+                print(f"{tp or 'hold 24h':>11} {sl or '-':>9} {s['mean']:7.2f} {ci:>15} {s['median']:7.2f} "
+                      f"{s['profitable']:10.0%}{flag}")
 
     rugs = [a for t in trades if t["label"] == "rug"
             if (a := rug_anatomy(t["path"], t["entry"], t["entry_block"]))]

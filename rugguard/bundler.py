@@ -4,7 +4,9 @@ from eth_abi import decode
 from eth_utils import keccak, to_checksum_address
 from web3 import Web3
 
-SWAP_TOPIC = keccak(text="Swap(address,uint256,uint256,uint256,uint256,address)").hex()
+SWAP_TOPIC = "0x" + keccak(text="Swap(address,uint256,uint256,uint256,uint256,address)").hex().removeprefix("0x")
+MINT_TOPIC = "0x" + keccak(text="Mint(address,uint256,uint256)").hex().removeprefix("0x")
+BURN_TOPIC = "0x" + keccak(text="Burn(address,uint256,uint256,address)").hex().removeprefix("0x")
 
 
 def _hex(value) -> str:
@@ -32,16 +34,29 @@ def bundle_features(buys: list[tuple[int, str]]) -> dict:
     }
 
 
-def fetch_early_buys(
-    w3: Web3, pair: str, from_block: int, to_block: int, alt_is_token0: bool
-) -> list[tuple[int, str]]:
+def activity_features(logs: list, alt_is_token0: bool) -> dict:
+    """觀察窗內的買家（bundler）與流動性加入 / 撤出次數。"""
+    buys, adds, removes = [], 0, 0
+    for log in logs:
+        topic = "0x" + _hex(log["topics"][0]).lower().removeprefix("0x")
+        if topic == SWAP_TOPIC:
+            if b := decode_buy(log, alt_is_token0):
+                buys.append(b)
+        elif topic == MINT_TOPIC:
+            adds += 1
+        elif topic == BURN_TOPIC:
+            removes += 1
+    return {**bundle_features(buys), "lp_adds": adds, "lp_removes": removes}
+
+
+def fetch_pair_activity(w3: Web3, pair: str, from_block: int, to_block: int, alt_is_token0: bool) -> dict:
     # shortcut: 買家取 Swap 的 `to`，多跳路由時會是下一個 pair；要精準需追 tx 的 from 與資金來源
     logs = w3.eth.get_logs(
         {
             "fromBlock": from_block,
             "toBlock": to_block,
             "address": w3.to_checksum_address(pair),
-            "topics": [SWAP_TOPIC],
+            "topics": [[SWAP_TOPIC, MINT_TOPIC, BURN_TOPIC]],
         }
     )
-    return [b for log in logs if (b := decode_buy(log, alt_is_token0))]
+    return activity_features(logs, alt_is_token0)

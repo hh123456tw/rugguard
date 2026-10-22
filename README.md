@@ -45,10 +45,22 @@ pip install -r requirements.txt
 cp .env.example .env
 # 填入 BSC_RPC_URL、TELEGRAM_BOT_TOKEN、TELEGRAM_CHAT_ID
 
-python -m rugguard.main
+python -m rugguard.main          # 前景執行蒐集程式
 ```
 
-每輪從上次掃到的區塊接著掃（不漏交易對）。新交易對會先等 600 塊（BSC 約 0.45 秒/塊 ≈ 4.5 分鐘），
+長期執行（Windows）：登入時自動啟動看門程式，蒐集程式掛掉自動重啟、回補定期接著做，不開視窗。
+
+```powershell
+.\scripts\register_task.ps1      # 註冊工作排程「RugGuard」
+Start-ScheduledTask -TaskName RugGuard
+# 停止：Stop-ScheduledTask -TaskName RugGuard；移除：Unregister-ScheduledTask -TaskName RugGuard
+```
+
+紀錄檔：`supervisor.log`、`collector.log`、`backfill.log`（及對應的 `.err.log`）。
+電腦睡眠時不會蒐集；要 24 小時不中斷請關閉睡眠或放到不關機的機器。
+
+只評估「剛好一邊是報價幣（WBNB / USDT / BUSD / USDC）」的交易對，另一邊才是新幣（設定在 `rugguard/chains.py`，
+之後加其他 EVM 鏈只要新增一筆設定）。每輪從上次掃到的區塊接著掃（不漏交易對）。新交易對會先等 600 塊（BSC 約 0.45 秒/塊 ≈ 4.5 分鐘），
 有流動性後才查 GoPlus、統計這 600 塊內的早期買家，並以當下價格作為買入價；約 30 分鐘仍無流動性就放棄。
 風險分數 >= 30 推送風險警示，能買分數 >= 50（有模型時）推送能買候選。
 
@@ -72,7 +84,7 @@ python -m rugguard.main
 python -m pytest tests/ -v
 ```
 
-83 個測試，涵蓋計分規則、事件解碼、bundler 特徵、延遲評估、標籤、匯出、模型訓練、價格路徑、回測、儀表板資料。
+119 個測試，涵蓋計分規則、事件解碼、bundler 特徵、延遲評估、標籤、匯出、模型訓練、價格路徑、回測、儀表板資料。
 
 ## 標籤系統（W2）
 
@@ -86,6 +98,7 @@ python -m pytest tests/ -v
 | `normal` | 其他 |
 
 標籤規則改變時，可用 `rugguard.labeler.relabel_all` 以已存價格重算。
+舊版把 USDT/新幣 交易對的 USDT 當成新幣（特徵與價格都錯），`mark_invalid` 會把這類列標成 `invalid`，不進訓練與回測。
 這些標籤累積成訓練資料庫，是未來 LightGBM 風險模型的訓練來源。
 
 ```bash
@@ -105,7 +118,9 @@ python -m rugguard.model training_data.csv rugguard_model.txt
 # 印出 cross-val AUC，並存檔
 ```
 
-多分類模型（rug / normal / win），只用有交易的代幣訓練。輸出風險分數 = P(rug)×100、
+多分類模型（rug / normal / win），只用有交易的代幣訓練，以**時間外驗證**（walk-forward：用過去訓練、預測未來）評估。
+特徵含 GoPlus 安全資料、早期買家 / bundler、觀察窗內 LP 加入 / 撤出、流動性美元深度、前 10 大持有人占比、創建者歷史。
+蒐集程式每 7 天自動重訓（`RETRAIN_DAYS`），新模型時間外 win AUC 比現有差 0.02 以上就保留舊的。輸出風險分數 = P(rug)×100、
 能買分數 = P(win)×100。`rugguard_model.txt` 存在時 `rugguard.main` 自動使用，否則用規則計分。
 新流程（v2）資料滿 200 筆後只用 v2 訓練，避免和舊的「偵測當下」特徵混用。
 
@@ -117,10 +132,17 @@ python -m rugguard.model training_data.csv rugguard_model.txt
 python -m rugguard.backtest
 ```
 
-輸出各種停利（1.2x-10x）× 停損組合扣手續費與稅後的平均/中位報酬，
+舊代幣可用 `python -m rugguard.backfill` 回補逐筆價格（bloXroute 公開節點，可中斷續跑）。
+
+輸出各種停利（1.2x-10x）× 停損組合扣手續費與稅後的平均 / 中位報酬與 bootstrap 95% 信賴區間（下界 > 1 才標記 EV>1），
 以及 rug 型態：一次崩完（來不及逃）的比例、撤池 vs 倒貨、進場到崩盤的時間、崩盤前曾漲到幾倍。
 
-文獻與業界做法整理見 [docs/research-sota.md](docs/research-sota.md)。
+文獻與業界做法整理見 [docs/research-sota.md](docs/research-sota.md)，階段規劃見 [docs/quant-plan.md](docs/quant-plan.md)。
+
+## 紙上交易
+
+能買分數 >= `MIN_BUY_SCORE` 時開虛擬倉位，每輪用取樣價格判斷停利（`PAPER_TP`，預設 2x）、停損（`PAPER_SL`，預設 0.5x）、
+最長持有（`PAPER_MAX_HOURS`，預設 24h），記錄扣手續費與稅後報酬。不動用任何真錢。儀表板顯示持倉、平倉、平均報酬與累積損益。
 
 ## 儀表板
 
@@ -139,6 +161,9 @@ python -m streamlit run rugguard/dashboard.py
 - [x] W3: Streamlit 儀表板
 - [x] 延遲評估 + 四類標籤 + 多分類模型（能買分數）
 - [x] 價格路徑取樣 + 停利/停損回測
+- [x] 交易對報價幣判斷修正（USDT/新幣）、鏈設定抽出
+- [x] 新特徵：LP 事件、流動性深度、持有人集中度、創建者歷史
+- [x] 時間外驗證 + 自動重訓 + 紙上交易 + 看門程式 / 工作排程
 - [ ] 回測扣費後期望值為正之前，不做自動下單
 
 ## 專案結構
@@ -154,7 +179,11 @@ rugguard/
 ├── store.py          # SQLite 標籤資料庫
 ├── labeler.py        # 24h 標籤判定與回填
 ├── export.py         # 訓練集 CSV 匯出
+├── chains.py         # 鏈設定（factory、報價幣、出塊時間）
 ├── paths.py          # Multicall3 價格路徑取樣
+├── backfill.py       # 舊代幣逐筆價格回補
+├── paper.py          # 紙上交易
+├── supervisor.py     # 看門程式（自動重啟）
 ├── backtest.py       # 停利/停損回測與 rug 型態分析
 ├── dashboard.py      # Streamlit 儀表板
 ├── notifier.py       # Telegram 推播 + 訊息格式化

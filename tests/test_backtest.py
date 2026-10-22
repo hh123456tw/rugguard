@@ -69,3 +69,19 @@ def test_load_trades_v1_needs_complete_backfill_and_uses_last_path_price():
     assert t["final"] == 2.0  # 用路徑最後價格，不是 30 幾小時後才量的 label_price
     assert t["cost"] == pytest.approx(0.9975 ** 2 * 0.9)
     assert json.loads(store.get_token("0xdone")["features"])["path_complete"]
+
+
+def test_summarize_ci_brackets_mean():
+    from rugguard.backtest import summarize
+
+    s = summarize([0.0] * 80 + [3.0] * 20)
+    assert s["ci_low"] < s["mean"] < s["ci_high"]
+    assert s["mean"] == pytest.approx(0.6)
+    assert s["ci_high"] < 1  # 這種分布扣費前就不賺錢
+
+
+def test_summarize_constant_returns_tight_ci():
+    from rugguard.backtest import summarize
+
+    s = summarize([1.2] * 50)
+    assert s["ci_low"] == pytest.approx(1.2) and s["ci_high"] == pytest.approx(1.2)

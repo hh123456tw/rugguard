@@ -16,25 +16,84 @@ FLAGS = [
     "external_call",
 ]
 NUMERIC = ["buy_tax", "sell_tax", "holder_count", "creator_percent", "owner_percent",
-           "early_buyers", "max_same_block_buyers", "entry_delay_blocks"]
+           "early_buyers", "max_same_block_buyers", "entry_delay_blocks",
+           "lp_adds", "lp_removes", "liquidity_usd", "top10_holder_percent",
+           "creator_prior_tokens", "creator_prior_rugs"]
 FEATURES = FLAGS + NUMERIC + ["lp_locked_ratio"]
 CLASSES = ["rug", "normal", "win"]  # dead（沒交易）不訓練
 MIN_V2_ROWS = 200  # 新流程（延遲評估）資料夠多後只用新資料，避免和舊的偵測當下特徵混用
 
 
+OPTIONAL = ("liquidity_usd", "top10_holder_percent")  # 查不到時用 -1，和真的 0 分開
+
+
 def extract_features(raw: dict) -> dict[str, float]:
     feats = {f: float(raw.get(f) == "1") for f in FLAGS}
     feats.update({f: _to_float(raw.get(f)) for f in NUMERIC})
+    for f in OPTIONAL:
+        if raw.get(f) is None:
+            feats[f] = -1.0
     locked = lp_locked_ratio(raw)
     feats["lp_locked_ratio"] = -1.0 if locked is None else locked  # -1 = 未知
     return feats
 
 
-def train(csv_path: str, model_path: str) -> None:
+def _classifier(min_count: int):
     import lightgbm as lgb
+
+    return lgb.LGBMClassifier(objective="multiclass", n_estimators=200, learning_rate=0.05, num_leaves=15,
+                              min_child_samples=max(2, min(20, min_count)), verbose=-1)
+
+
+def walk_forward(df, n_splits: int = 5):
+    """依時間先後：用前面的資料訓練、預測後面的一段，逐段往前滾。回傳 (有預測的列, 機率)。"""
+    import numpy as np
+    from sklearn.model_selection import TimeSeriesSplit
+
+    df = df.sort_values("detected_at") if "detected_at" in df else df
+    X, y = df[FEATURES], df["label"].map(CLASSES.index)
+    probs = np.full((len(df), len(CLASSES)), np.nan)
+    for train_idx, test_idx in TimeSeriesSplit(n_splits=n_splits).split(X):
+        counts = y.iloc[train_idx].value_counts()
+        if len(counts) < len(CLASSES):
+            continue  # 這段訓練資料缺某一類，跳過
+        clf = _classifier(int(counts.min())).fit(X.iloc[train_idx], y.iloc[train_idx])
+        probs[test_idx] = clf.predict_proba(X.iloc[test_idx])
+    mask = ~np.isnan(probs[:, 0])
+    return df[mask], probs[mask]
+
+
+def evaluate(df, probs) -> dict:
     import pandas as pd
     from sklearn.metrics import roc_auc_score
-    from sklearn.model_selection import StratifiedKFold, cross_val_predict
+
+    y = df["label"].map(CLASSES.index).to_numpy()
+
+    def auc(cls):
+        truth = y == cls
+        return float(roc_auc_score(truth, probs[:, cls])) if 0 < truth.sum() < len(truth) else float("nan")
+
+    top = probs[:, 2] >= pd.Series(probs[:, 2]).quantile(0.9)
+    metrics = {
+        "n_eval": int(len(y)),
+        "rug_auc": auc(0),
+        "win_auc": auc(2),
+        "top10_win_rate": float((y[top] == 2).mean()),
+        "top10_rug_rate": float((y[top] == 0).mean()),
+        "base_win_rate": float((y == 2).mean()),
+        "base_rug_rate": float((y == 0).mean()),
+    }
+    if "ret" in df:
+        metrics["top10_median_ret"] = float(pd.Series(df["ret"].to_numpy()[top]).median())
+    return metrics
+
+
+def train(csv_path: str, model_path: str, only_if_better: bool = False) -> dict:
+    """訓練並存檔，回傳時間外驗證指標。only_if_better=True 時，win AUC 比現有模型差 0.02 以上就不覆蓋。"""
+    import json
+    import os
+
+    import pandas as pd
 
     df = pd.read_csv(csv_path)
     df = df[df["label"].isin(CLASSES)]
@@ -45,30 +104,27 @@ def train(csv_path: str, model_path: str) -> None:
     else:
         print(f"warning: only {(version >= 2).sum()} v2 rows, training on all {len(df)} traded rows")
 
-    X = df[FEATURES]
     y = df["label"].map(CLASSES.index)
     counts = y.value_counts()
     if len(counts) < len(CLASSES) or counts.min() < 2:
         raise ValueError(f"need >= 2 rows of each of rug/normal/win, got {df['label'].value_counts().to_dict()}")
 
-    clf = lgb.LGBMClassifier(objective="multiclass", n_estimators=200, learning_rate=0.05, num_leaves=15,
-                             min_child_samples=min(20, int(counts.min())), verbose=-1)
-    # 不打亂：折大致依時間切，比隨機切更接近實戰
-    cv = StratifiedKFold(n_splits=min(5, int(counts.min())))
-    probs = cross_val_predict(clf, X, y, cv=cv, method="predict_proba")
-    print(f"n={len(y)} " + " ".join(f"{c}={int((y == i).sum())}" for i, c in enumerate(CLASSES)))
-    print(f"rug AUC: {roc_auc_score(y == 0, probs[:, 0]):.3f}  win AUC: {roc_auc_score(y == 2, probs[:, 2]):.3f}")
+    eval_df, probs = walk_forward(df)
+    metrics = {"n": int(len(df)), **{c: int((y == i).sum()) for i, c in enumerate(CLASSES)}, **evaluate(eval_df, probs)}
+    print("walk-forward (train on past, test on future): " + json.dumps(metrics, ensure_ascii=False))
 
-    top = probs[:, 2] >= pd.Series(probs[:, 2]).quantile(0.9)
-    base = (y == 2).mean()
-    print(f"top 10% by buy score: win rate {(y[top] == 2).mean():.0%} (base {base:.0%}), "
-          f"rug rate {(y[top] == 0).mean():.0%} (base {(y == 0).mean():.0%})")
-    if "ret" in df:
-        print(f"top 10% median 24h return: {df['ret'][top].median():.2f}x (all traded: {df['ret'].median():.2f}x)")
+    meta_path = model_path + ".json"
+    if only_if_better and os.path.exists(meta_path):
+        old = json.load(open(meta_path, encoding="utf-8"))
+        if metrics["win_auc"] < old.get("win_auc", 0) - 0.02:
+            print(f"not saved: win AUC {metrics['win_auc']:.3f} worse than current {old['win_auc']:.3f}")
+            return {**metrics, "saved": False}
 
-    clf.fit(X, y)
+    clf = _classifier(int(counts.min())).fit(df[FEATURES], y)
     clf.booster_.save_model(model_path)
+    json.dump(metrics, open(meta_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
     print(f"saved model to {model_path}")
+    return {**metrics, "saved": True}
 
 
 class RiskModel:

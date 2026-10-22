@@ -1,11 +1,12 @@
 import requests
 
-BSC_CHAIN_ID = "56"
+from rugguard.chains import CHAIN
+
 BASE_URL = "https://api.gopluslabs.io/api/v1/token_security/{chain_id}"
 
 
 class GoPlusClient:
-    def __init__(self, chain_id: str = BSC_CHAIN_ID, base_url: str = BASE_URL):
+    def __init__(self, chain_id: str = CHAIN["goplus_chain_id"], base_url: str = BASE_URL):
         self.chain_id = chain_id
         self.base_url = base_url
 

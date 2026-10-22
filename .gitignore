@@ -11,3 +11,5 @@ collector.log
 collector.err.log
 backfill.log
 backfill.err.log
+supervisor.log
+rugguard_model.txt.json

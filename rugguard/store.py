@@ -45,6 +45,23 @@ class LabelStore:
         # 進場後 24h 內每輪取樣的價格與兩邊儲備（分辨撤池 vs 倒貨）
         self.conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS positions (
+                pair TEXT PRIMARY KEY,
+                token TEXT NOT NULL,
+                opened_block INTEGER NOT NULL,
+                opened_at TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                cost REAL NOT NULL,
+                expires_block INTEGER NOT NULL,
+                closed_block INTEGER,
+                closed_at TEXT,
+                reason TEXT,
+                net_return REAL
+            )
+            """
+        )
+        self.conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS backfill_chunks (
                 pair TEXT NOT NULL,
                 start_block INTEGER NOT NULL,
@@ -143,6 +160,38 @@ class LabelStore:
     def mark_chunk_done(self, pair: str, start_block: int) -> None:
         self.conn.execute("INSERT OR IGNORE INTO backfill_chunks VALUES (?, ?)", (pair, start_block))
         self.conn.commit()
+
+    def creator_history(self, creator: str) -> tuple[int, int]:
+        """同一個創建者之前在資料庫裡的 (代幣數, rug 數)。只看已存的列，沒有未來資訊。"""
+        if not creator:
+            return 0, 0
+        pattern = '%"creator_address": "' + creator.lower() + '"%'
+        row = self.conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(label = 'rug'), 0) FROM tokens WHERE lower(features) LIKE ?",
+            (pattern,),
+        ).fetchone()
+        return int(row[0]), int(row[1])
+
+    def open_position(self, pair: str, token: str, block: int, price: float, cost: float, expires_block: int) -> None:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO positions (pair, token, opened_block, opened_at, entry_price, cost, expires_block)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (pair, token, block, _now(), price, cost, expires_block),
+        )
+        self.conn.commit()
+
+    def get_open_positions(self) -> list[sqlite3.Row]:
+        return list(self.conn.execute("SELECT * FROM positions WHERE closed_block IS NULL"))
+
+    def close_position(self, pair: str, block: int, reason: str, net_return: float) -> None:
+        self.conn.execute(
+            "UPDATE positions SET closed_block = ?, closed_at = ?, reason = ?, net_return = ? WHERE pair = ?",
+            (block, _now(), reason, net_return, pair),
+        )
+        self.conn.commit()
+
+    def get_positions(self) -> list[sqlite3.Row]:
+        return list(self.conn.execute("SELECT * FROM positions ORDER BY opened_at DESC"))
 
     def get_token(self, pair: str) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM tokens WHERE pair = ?", (pair,)).fetchone()

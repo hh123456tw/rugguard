@@ -54,12 +54,14 @@ READY = 100 + main.ENTRY_DELAY_BLOCKS
 def chain(monkeypatch):
     calls = {}
 
-    def buys(w3, pair, start, end, alt_is_token0):
+    def activity(w3, pair, start, end, alt_is_token0):
         calls["window"] = (start, end)
-        return [(start, "0xa"), (start, "0xb")]
+        return {"early_buyers": 2, "max_same_block_buyers": 2, "lp_adds": 1, "lp_removes": 0}
 
-    monkeypatch.setattr(main, "fetch_early_buys", buys)
-    monkeypatch.setattr(main, "get_pair_price", lambda *a: calls.get("price", 0.002))
+    monkeypatch.setattr(main, "fetch_pair_activity", activity)
+    # 儲備：新幣 1000、BNB 2 → 價格 0.002；price=0 時代表沒流動性
+    monkeypatch.setattr(main, "get_pair_reserves",
+                        lambda *a: (1000, 0) if calls.get("price") == 0.0 else (1000, 2))
     return calls
 
 
@@ -94,6 +96,9 @@ def test_evaluate_stores_features_with_fixed_window(chain):
     assert feats["max_same_block_buyers"] == 2
     assert feats["entry_delay_blocks"] == latest - 100
     assert feats["version"] == 2
+    assert feats["lp_adds"] == 1
+    assert feats["liquidity_usd"] is None  # 沒給 BNB 美元價就是未知
+    assert (feats["creator_prior_tokens"], feats["creator_prior_rugs"]) == (0, 0)
     assert len(notifier.sent) == 1
 
 
@@ -115,11 +120,32 @@ def test_model_scores_and_buy_alert(chain):
     run(store, notifier=notifier, model=SimpleNamespace(predict=lambda f: (10, 80)))
     row = store.get_token("0xpair")
     assert (row["score"], row["buy_score"]) == (10, 80)
-    assert len(notifier.sent) == 1
-    assert "能買候選" in notifier.sent[0]
+    assert any("能買候選" in m for m in notifier.sent)
+    assert any("紙上買入" in m for m in notifier.sent)
+    pos = store.get_open_positions()
+    assert len(pos) == 1 and pos[0]["entry_price"] == 0.002
 
 
 def test_low_buy_score_no_alert(chain):
     notifier = FakeNotifier()
     run(LabelStore(":memory:"), notifier=notifier, model=SimpleNamespace(predict=lambda f: (10, 49)))
     assert notifier.sent == []
+
+
+def test_retrain_keeps_model_when_not_enough_data(monkeypatch, capsys):
+    monkeypatch.setattr(main, "export_labels", lambda: None)
+
+    def fail(*a, **k):
+        raise ValueError("need >= 2 rows of each of rug/normal/win")
+
+    monkeypatch.setattr(main, "train", fail)
+    current = object()
+    assert main.retrain(current) is current
+    assert "retrain skipped" in capsys.readouterr().out
+
+
+def test_retrain_keeps_model_when_new_one_worse(monkeypatch):
+    monkeypatch.setattr(main, "export_labels", lambda: None)
+    monkeypatch.setattr(main, "train", lambda *a, **k: {"saved": False})
+    current = object()
+    assert main.retrain(current) is current

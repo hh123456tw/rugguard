@@ -4,7 +4,8 @@ from eth_abi import decode
 from eth_utils import keccak, to_checksum_address
 from web3 import Web3
 
-PANCAAKESWAP_FACTORY = "0xca143ce32fe78f1f7019d7d551a6402fc5350c73"
+from rugguard.chains import CHAIN
+
 PAIR_CREATED_TOPIC = keccak(text="PairCreated(address,address,address,uint256)").hex()
 
 PAIR_CREATED_ABI = {
@@ -58,7 +59,7 @@ def decode_pair_created_log(log: dict) -> PairCreatedEvent:
 class PancakePairScanner:
     def __init__(self, w3: Web3):
         self.w3 = w3
-        self.factory = w3.to_checksum_address(PANCAAKESWAP_FACTORY)
+        self.factory = w3.to_checksum_address(CHAIN["factory"])
 
     def fetch_pairs(self, from_block: int, to_block: int) -> list[PairCreatedEvent]:
         logs = self.w3.eth.get_logs(

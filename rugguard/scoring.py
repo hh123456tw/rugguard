@@ -10,6 +10,18 @@ def lp_locked_ratio(token: dict) -> float | None:
     return sum(_to_float(h.get("percent")) for h in holders if str(h.get("is_locked")) == "1")
 
 
+BURN_ADDRESSES = {"0x000000000000000000000000000000000000dead", "0x0000000000000000000000000000000000000000"}
+
+
+def top10_holder_percent(holders: list | None, pair: str) -> float | None:
+    """前 10 大持有人占比，排除交易對本身與銷毀地址（那些不是真的持有人）。"""
+    if not holders:
+        return None
+    skip = BURN_ADDRESSES | {pair.lower()}
+    real = [h for h in holders if str(h.get("address", "")).lower() not in skip]
+    return sum(_to_float(h.get("percent")) for h in real[:10])
+
+
 def compute_risk_score(token: dict) -> int:
     score = 0
 

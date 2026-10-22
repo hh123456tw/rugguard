@@ -13,6 +13,7 @@ from eth_utils import keccak
 from web3 import Web3
 
 from rugguard.backtest import BLOCK_SECONDS, HORIZON_BLOCKS
+from rugguard.labeler import TRADED_LABELS
 from rugguard.paths import to_point
 
 SYNC_TOPIC = "0x" + keccak(text="Sync(uint112,uint112)").hex().removeprefix("0x")
@@ -69,7 +70,8 @@ def entry_block_for(w3: Web3, row, feats: dict) -> int:
 
 
 def run(store, w3_hist: Web3, w3_blocks: Web3) -> None:
-    rows = [r for r in store.get_training_rows() if r["label"] != "dead" and r["features"] and r["initial_price"] > 0]
+    rows = [r for r in store.get_training_rows()
+            if r["label"] in TRADED_LABELS and r["features"] and r["initial_price"] > 0]
     todo = []
     for row in rows:
         feats = json.loads(row["features"])
