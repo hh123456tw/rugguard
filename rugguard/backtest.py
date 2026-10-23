@@ -12,6 +12,12 @@ TAKE_PROFITS = [None, 1.2, 1.5, 2, 3, 5, 10]
 STOP_LOSSES = [None, 0.7, 0.5]
 BLOCK_SECONDS = CHAIN["block_seconds"]
 HORIZON_BLOCKS = int(24 * 3600 / BLOCK_SECONDS)
+# 觸發後要等幾個塊才成交：快速機器人約 3 塊；本系統每分鐘輪詢約 60 秒
+LATENCIES = {"bot ~1.4s": 3, "1-min poll": int(60 / BLOCK_SECONDS)}
+POSITION_USD = float(os.getenv("POSITION_USD", "20"))  # 每筆部位大小
+MAX_FIRST_JUMP = 50
+MIN_ENTRY_USD = float(os.getenv("MIN_ENTRY_USD", "1000"))  # 進場流動性太小的池子買不進去，不回測
+NATIVE_USD_APPROX = 700  # shortcut: 舊資料沒存當時 BNB 價，用固定值換算流動性；要精準需存每筆進場時的 BNB 價
 
 
 def trade_cost(feats: dict) -> float:
@@ -19,19 +25,45 @@ def trade_cost(feats: dict) -> float:
     return (1 - SWAP_FEE) ** 2 * (1 - _to_float(feats.get("buy_tax"))) * (1 - _to_float(feats.get("sell_tax")))
 
 
-def simulate(path: list[tuple[int, float]], entry: float, final: float,
-             tp: float | None, sl: float | None, cost: float) -> float:
-    """path: 進場後依序的 (block, price)。回傳扣成本後的報酬倍數（1 = 打平）。
+def simulate(path: list[tuple[int, float, float, float]], entry: float, tp: float | None, sl: float | None,
+             cost: float, latency: int = 0, position: float = 1.0) -> float:
+    """path: 進場後依序的 (block, price, 新幣儲備, 報價幣儲備)，儲備為鏈上原始單位。
+    position: 投入的報價幣（原始單位）。回傳扣成本後的報酬倍數（1 = 打平）。
 
-    停利假設剛好在 tp 成交；停損在觸發後看到的那個價格成交（rug 時通常已接近 0）。
+    用 AMM 公式算實際能賣回多少：所得 = 報價幣儲備 × 持有顆數 / (新幣儲備 + 持有顆數)。
+    所以賣出最多只能拿走池子裡的報價幣；被抽乾或被燒幣的池子，價格再高也賣不到錢。
+    買入用第一個價格點的報價幣儲備估算自己推高價格的損失。
+    觸發停利 / 停損後，用 latency 個塊之後的狀態以市價賣出。24h 都沒交易代表價格沒變。
     """
-    for _, price in path:
-        r = price / entry
-        if tp and r >= tp:
-            return tp * cost
-        if sl and r <= sl:
-            return r * cost
-    return final / entry * cost
+    if not path:
+        return cost
+    first_quote = path[0][3]
+    held = position / entry * first_quote / (first_quote + position) if first_quote > 0 else 0.0
+
+    # 新幣儲備大減、報價幣卻沒增加：AMM 交易做不到，是合約直接改餘額（honeypot / 操縱），之後一律視為賣不掉
+    manipulated_from = next((i for i in range(1, len(path))
+                             if path[i][2] < path[i - 1][2] * 0.5 and path[i][3] <= path[i - 1][3] * 1.01), None)
+    # shortcut: 進場與第一個價格點之間沒有儲備可比，第一筆就漲 50 倍以上視為操縱；要精準需記錄進場當下的儲備
+    if path[0][1] / entry > MAX_FIRST_JUMP:
+        manipulated_from = 0
+
+    def value(i: int) -> float:
+        if manipulated_from is not None and i >= manipulated_from:
+            return 0.0
+        _, _, reserve_alt, reserve_quote = path[i]
+        return reserve_quote * held / (reserve_alt + held) / position if held else 0.0
+
+    def fill(i: int) -> float:
+        target, j = path[i][0] + latency, i
+        while j + 1 < len(path) and path[j + 1][0] <= target:
+            j += 1
+        return value(j)
+
+    for i in range(len(path)):
+        r = value(i)
+        if (tp and r >= tp) or (sl and r <= sl):
+            return fill(i) * cost
+    return value(len(path) - 1) * cost
 
 
 def rug_anatomy(path: list[tuple[int, float, float]], entry: float, entry_block: int) -> dict | None:
@@ -65,6 +97,20 @@ def summarize(returns: list[float], resamples: int = 1000) -> dict:
     }
 
 
+def entry_liquidity_usd(feats: dict, path: list, token0: str, token1: str) -> float | None:
+    if feats.get("liquidity_usd") is not None:
+        return feats["liquidity_usd"]
+    if not path:
+        return None
+    # 舊資料：用進場後第一個價格點的報價幣儲備近似
+    return path[0]["reserve_bnb"] / 10 ** 18 * quote_usd(token0, token1)
+
+
+def quote_usd(token0: str, token1: str) -> float:
+    quote = token0 if token0.lower() in CHAIN["quotes"] else token1
+    return 1.0 if quote.lower() in CHAIN["stables"] else NATIVE_USD_APPROX
+
+
 def load_trades(store) -> list[dict]:
     trades = []
     for row in store.get_training_rows():
@@ -79,12 +125,12 @@ def load_trades(store) -> list[dict]:
         trades.append({
             "entry": row["initial_price"],
             "entry_block": entry_block,
-            # 持有到期用 24h 內最後一個價格；24h 都沒交易代表價格沒變
-            "final": path[-1]["price"] if path else row["initial_price"],
+            "entry_usd": entry_liquidity_usd(feats, path, row["token0"], row["token1"]),
             "label": row["label"],
             "buy_score": row["buy_score"],
             "cost": trade_cost(feats),
-            "path": [(p["block"], p["price"], p["reserve_alt"]) for p in path],
+            "path": [(p["block"], p["price"], p["reserve_alt"], p["reserve_bnb"]) for p in path],
+            "position": POSITION_USD / quote_usd(row["token0"], row["token1"]) * 10 ** 18,
         })
     return trades
 
@@ -93,18 +139,22 @@ def report(trades: list[dict]) -> None:
     if not trades:
         print("no v2 trades with price paths yet; let the collector run > 24h")
         return
+    small = [t for t in trades if t["entry_usd"] is None or t["entry_usd"] < MIN_ENTRY_USD]
+    trades = [t for t in trades if t not in small]
+    print(f"excluded {len(small)} trades with entry liquidity < ${MIN_ENTRY_USD:.0f} or unknown; {len(trades)} left")
+    if not trades:
+        return
     groups = {"all traded": trades}
     scored = sorted((t for t in trades if t["buy_score"] is not None), key=lambda t: -t["buy_score"])
     if len(scored) >= 10:
         groups["top 10% buy score"] = scored[: len(scored) // 10]
 
-    for name, group in groups.items():
-        print(f"\n== {name} (n={len(group)}) ==")
+    for (name, group), (lat_name, latency) in [(g, lat) for g in groups.items() for lat in LATENCIES.items()]:
+        print(f"\n== {name} (n={len(group)}), ${POSITION_USD:.0f}/trade, fill latency {lat_name} ({latency} blocks) ==")
         print(f"{'take profit':>11} {'stop loss':>9} {'mean':>7} {'95% CI':>15} {'median':>7} {'profitable':>10}")
         for tp in TAKE_PROFITS:
             for sl in STOP_LOSSES:
-                rets = [simulate([(b, p) for b, p, _ in t["path"]], t["entry"], t["final"],
-                                 tp, sl, t["cost"]) for t in group]
+                rets = [simulate(t["path"], t["entry"], tp, sl, t["cost"], latency, t["position"]) for t in group]
                 s = summarize(rets)
                 ci = f"[{s['ci_low']:.2f}, {s['ci_high']:.2f}]"
                 flag = "  <- EV>1" if s["ci_low"] > 1 else ""
@@ -112,7 +162,7 @@ def report(trades: list[dict]) -> None:
                       f"{s['profitable']:10.0%}{flag}")
 
     rugs = [a for t in trades if t["label"] == "rug"
-            if (a := rug_anatomy(t["path"], t["entry"], t["entry_block"]))]
+            if (a := rug_anatomy([(b, p, alt) for b, p, alt, _ in t["path"]], t["entry"], t["entry_block"]))]
     if rugs:
         print(f"\n== rug anatomy (n={len(rugs)}) ==")
         print(f"one-step crash (no time to exit): {sum(a['one_step'] for a in rugs) / len(rugs):.0%}")
