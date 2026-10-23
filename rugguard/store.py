@@ -60,6 +60,25 @@ class LabelStore:
             )
             """
         )
+        # 狙擊者研究：建池後 2 小時每筆買賣（錢包、方向、數量）
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sniper_trades (
+                pair TEXT NOT NULL,
+                tx TEXT NOT NULL,
+                log_index INTEGER NOT NULL,
+                block INTEGER NOT NULL,
+                wallet TEXT NOT NULL,
+                side TEXT NOT NULL,
+                alt_amount REAL NOT NULL,
+                quote_amount REAL NOT NULL,
+                PRIMARY KEY (pair, tx, log_index)
+            )
+            """
+        )
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS sniper_done (pair TEXT PRIMARY KEY, first_mint INTEGER)"
+        )
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS backfill_chunks (
@@ -192,6 +211,22 @@ class LabelStore:
 
     def get_positions(self) -> list[sqlite3.Row]:
         return list(self.conn.execute("SELECT * FROM positions ORDER BY opened_at DESC"))
+
+    def add_sniper_trades(self, pair: str, first_mint: int | None, trades: list[tuple]) -> None:
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO sniper_trades VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [(pair, tx, i, b, w, side, float(alt), float(q)) for tx, i, b, w, side, alt, q in trades],
+        )
+        self.conn.execute("INSERT OR REPLACE INTO sniper_done VALUES (?, ?)", (pair, first_mint))
+        self.conn.commit()
+
+    def get_sniper_done(self) -> dict:
+        return {r["pair"]: r["first_mint"] for r in self.conn.execute("SELECT * FROM sniper_done")}
+
+    def get_sniper_trades(self, pair: str) -> list[tuple]:
+        return [tuple(r) for r in self.conn.execute(
+            "SELECT tx, log_index, block, wallet, side, alt_amount, quote_amount FROM sniper_trades WHERE pair = ?",
+            (pair,))]
 
     def get_token(self, pair: str) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM tokens WHERE pair = ?", (pair,)).fetchone()

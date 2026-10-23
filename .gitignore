@@ -13,3 +13,5 @@ backfill.log
 backfill.err.log
 supervisor.log
 rugguard_model.txt.json
+snipers.log
+snipers.err.log
