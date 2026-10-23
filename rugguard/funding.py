@@ -228,9 +228,12 @@ def report(data_dir: str = DATA_DIR) -> None:
         results[name] = (by_symbol, metrics(train), metrics(test))
 
     print(f"\n== strategies, equal-weight portfolio of {len(SYMBOLS)} symbols; train < {SPLIT.date()} <= test ==")
-    print(f"{'strategy':>16} {'train ann':>9} {'test ann':>9} {'test maxDD':>10} {'test Sharpe':>11} {'in market':>9}")
+    print(f"{'strategy':>16} {'train ann':>9} {'test ann':>9} {'+idle cash':>10} {'test maxDD':>10} "
+          f"{'test Sharpe':>11} {'in market':>9}")
     for name, (_, tr, te) in results.items():
-        print(f"{name:>16} {_pct(tr['ann']):>9} {_pct(te['ann']):>9} {_pct(te['max_dd']):>10} "
+        # 空手的時候資本拿現金收益，所以總報酬 = 策略報酬 + 空手比例 × 現金收益
+        print(f"{name:>16} {_pct(tr['ann']):>9} {_pct(te['ann']):>9} "
+              f"{_pct(te['ann'] + (1 - te['in_market']) * CASH_RATE):>10} {_pct(te['max_dd']):>10} "
               f"{te['sharpe']:>11.1f} {te['in_market']:>9.0%}")
 
     best = max((n for n in results if n != "always-on"), key=lambda n: results[n][1]["ann"])
@@ -239,8 +242,10 @@ def report(data_dir: str = DATA_DIR) -> None:
         by_symbol, _, _ = results[name]
         _, test = _split(portfolio(by_symbol), split_ms)
         m = metrics(test, ci=True)
-        verdict = "beats cash" if m["ci_low"] > CASH_RATE else ("CI includes cash" if m["ci_high"] > CASH_RATE else "below cash")
-        print(f"{name:>16} out-of-sample: ann {_pct(m['ann'])}  95% CI [{m['ci_low']:.1%}, {m['ci_high']:.1%}]  -> {verdict}")
+        idle = (1 - m["in_market"]) * CASH_RATE  # 空手期間的現金收益
+        lo, hi = m["ci_low"] + idle, m["ci_high"] + idle
+        verdict = "beats cash" if lo > CASH_RATE else ("CI includes cash" if hi > CASH_RATE else "below cash")
+        print(f"{name:>16} out-of-sample incl. idle cash: ann {_pct(m['ann'] + idle)}  95% CI [{lo:.1%}, {hi:.1%}]  -> {verdict}")
         per_symbol = {s: metrics(_split(series, split_ms)[1])["ann"] for s, series in by_symbol.items()}
         print("                 per symbol (test): " + "  ".join(f"{s[:-4]} {v:5.1%}" for s, v in per_symbol.items()))
 
