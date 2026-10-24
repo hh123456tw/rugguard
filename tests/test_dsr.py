@@ -4,7 +4,7 @@ import random
 import pytest
 
 from rugguard.dsr import (break_even_trials, dsr, expected_max_sharpe, moments, psr, psr_from_moments,
-                          sharpe)
+                          sampling_variance, sharpe)
 
 
 def noise(seed, n=500, mean=0.0, sd=0.01):
@@ -83,3 +83,13 @@ def test_benchmark_raises_the_bar():
     trials = [sharpe(noise(s, mean=0.001)) for s in range(40, 50)]
     assert dsr(x, trials, 10, benchmark=0.05) < dsr(x, trials, 10, benchmark=0.0)
     assert break_even_trials(x, trials, benchmark=0.05) <= break_even_trials(x, trials)
+
+
+def test_degenerate_trial_inflates_trial_variance_but_not_sampling_variance():
+    x = noise(8, n=400, mean=0.0015)
+    sane = [sharpe(noise(s, n=400, mean=0.0005)) for s in range(60, 70)]
+    with_degenerate = sane + [-8.0]  # 幾乎沒變異又全虧的設定，Sharpe 會是極端值
+    assert dsr(x, with_degenerate, 11) < dsr(x, sane, 11)  # 論文原式被極端值拉低
+    v = sampling_variance(len(x))
+    assert dsr(x, with_degenerate, 11, trial_variance=v) == pytest.approx(dsr(x, sane, 11, trial_variance=v))
+    assert v == pytest.approx(1 / 399)

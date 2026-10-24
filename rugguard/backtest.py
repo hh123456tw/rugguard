@@ -135,19 +135,31 @@ def load_trades(store) -> list[dict]:
     return trades
 
 
+def eligible(trades: list[dict]) -> list[dict]:
+    """進場流動性夠大（買得進去）的交易；未知也排除。"""
+    return [t for t in trades if t["entry_usd"] is not None and t["entry_usd"] >= MIN_ENTRY_USD]
+
+
+def top_decile(trades: list[dict]) -> list[dict]:
+    """有能買分數的交易中，分數最高的 10%（少於 10 筆時回傳空）。分數相同時保持原本順序。"""
+    scored = sorted((t for t in trades if t["buy_score"] is not None), key=lambda t: -t["buy_score"])
+    return scored[: len(scored) // 10] if len(scored) >= 10 else []
+
+
 def report(trades: list[dict]) -> None:
     if not trades:
         print("no v2 trades with price paths yet; let the collector run > 24h")
         return
-    small = [t for t in trades if t["entry_usd"] is None or t["entry_usd"] < MIN_ENTRY_USD]
-    trades = [t for t in trades if t not in small]
-    print(f"excluded {len(small)} trades with entry liquidity < ${MIN_ENTRY_USD:.0f} or unknown; {len(trades)} left")
+    kept = eligible(trades)
+    print(f"excluded {len(trades) - len(kept)} trades with entry liquidity < ${MIN_ENTRY_USD:.0f} or unknown; "
+          f"{len(kept)} left")
+    trades = kept
     if not trades:
         return
     groups = {"all traded": trades}
-    scored = sorted((t for t in trades if t["buy_score"] is not None), key=lambda t: -t["buy_score"])
-    if len(scored) >= 10:
-        groups["top 10% buy score"] = scored[: len(scored) // 10]
+    top = top_decile(trades)
+    if top:
+        groups["top 10% buy score"] = top
 
     for (name, group), (lat_name, latency) in [(g, lat) for g in groups.items() for lat in LATENCIES.items()]:
         print(f"\n== {name} (n={len(group)}), ${POSITION_USD:.0f}/trade, fill latency {lat_name} ({latency} blocks) ==")

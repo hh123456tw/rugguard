@@ -137,3 +137,23 @@ def test_real_buy_pressure_is_not_manipulation():
 def test_first_point_huge_jump_from_entry_is_manipulation():
     p = [(101, 1e9, BIG, BIG)]
     assert sim(p, tp=2) == 0.0
+
+
+def trade(score=None, usd=5000.0):
+    return {"buy_score": score, "entry_usd": usd}
+
+
+def test_eligible_drops_small_and_unknown_liquidity():
+    from rugguard.backtest import eligible
+
+    kept = eligible([trade(1, 5000.0), trade(2, 999.0), trade(3, None), trade(4, 1000.0)])
+    assert [t["buy_score"] for t in kept] == [1, 4]  # 剛好 1000 美元保留，999 排除
+
+
+def test_top_decile_picks_highest_scores_and_ignores_unscored():
+    from rugguard.backtest import top_decile
+
+    trades = [trade(s) for s in range(20)] + [trade(None) for _ in range(30)]
+    top = top_decile(trades)
+    assert [t["buy_score"] for t in top] == [19, 18]  # 20 筆有分數的前 10%；沒分數的不算
+    assert top_decile([trade(1)] * 9) == []  # 不到 10 筆有分數就不分組
